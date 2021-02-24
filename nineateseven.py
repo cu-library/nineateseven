@@ -161,6 +161,9 @@ def cli(
                         d7_fieldname,
                         d9_fieldname,
                         field_config,
+                        target,
+                        targetusername,
+                        targetpassword,
                     )
                     patch(
                         field,
@@ -238,8 +241,41 @@ def create_nodes(connection, bundle):
             node["data"]["attributes"]["created"] = datetime.datetime.fromtimestamp(
                 row["created"], tz=datetime.timezone.utc
             ).isoformat()
+            alias = get_path_alias(connection, row["nid"])
+            if alias:
+                node["data"]["attributes"]["path"] = {"alias": alias}
             nodes.append(node)
     return nodes
+
+
+def get_path_alias(connection, nid):
+    with connection.cursor() as cursor:
+        sql = "SELECT `alias` FROM `url_alias` WHERE `source`=%s"
+        cursor.execute(sql, (f"node/{nid}",))
+        row = cursor.fetchone()
+        if row:
+            alias = row["alias"]
+            if not alias.startswith("/"):
+                alias = "/" + alias
+            return alias
+        return None
+
+
+def get_path_from_fid(connection, fid):
+    with connection.cursor() as cursor:
+        sql = "SELECT `filename`, `uri` FROM `file_managed` WHERE `fid`=%s"
+        cursor.execute(sql, (fid,))
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError(f"Unable to find file path for fid {fid}")
+        if not row["uri"].startswith("public://"):
+            raise ValueError(f"Trying to send private file for fid {fid}")
+        return (
+            row["uri"].replace(
+                "public://", "/var/www/drupal/drupal-root/sites/default/files/"
+            ),
+            row["filename"],
+        )
 
 
 def create_field(
@@ -252,6 +288,9 @@ def create_field(
     d7fieldname,
     d9fieldname,
     field_config,
+    target,
+    targetusername,
+    targetpassword,
 ):
     field = {
         "data": {
@@ -274,21 +313,44 @@ def create_field(
             if field_config["type"] == "link_field":
                 field_data = {}
                 field_data["uri"] = clean_uri(row[f"{d7fieldname}_url"], nid_to_d9_node)
+                if field_data["uri"] == "":
+                    field_data["uri"] = "route:<nolink>"
                 field_data["title"] = row[f"{d7fieldname}_title"]
                 attributes.append(field_data)
             elif field_config["type"] == "text" or field_config["type"] == "text_long":
-                # If the d7 text field has a null format, the d9 text field is plain.
-                if row[f"{d7fieldname}_format"] is None:
-                    attributes.append(row[f"{d7fieldname}_value"])
+                if (
+                    d7fieldname in config["concatinate_text_field"]
+                    and len(attributes) > 0
+                ):
+                    if row[f"{d7fieldname}_format"] is None:
+                        attributes[0] = (
+                            attributes[0]
+                            + config["concatinate_text_field"][d7fieldname]
+                            + row[f"{d7fieldname}_value"]
+                        )
+                    else:
+                        attributes[0]["value"] = (
+                            attributes[0]["value"]
+                            + config["concatinate_text_field"][d7fieldname]
+                            + row[f"{d7fieldname}_value"]
+                        )
                 else:
-                    field_data = {}
-                    field_data["value"] = clean_text(
-                        row[f"{d7fieldname}_value"], nid_to_d9_node
-                    )
-                    field_data["format"] = config["text_format_mappings"][
-                        str(row[f"{d7fieldname}_format"])
-                    ]
-                    attributes.append(field_data)
+                    # If the d7 text field has a null format,
+                    # the d9 text field is plain.
+                    if (
+                        row[f"{d7fieldname}_format"] is None
+                        or d7fieldname in config["formatted_to_plain"]
+                    ):
+                        attributes.append(row[f"{d7fieldname}_value"])
+                    else:
+                        field_data = {}
+                        field_data["value"] = clean_text(
+                            row[f"{d7fieldname}_value"], nid_to_d9_node
+                        )
+                        field_data["format"] = config["text_format_mappings"][
+                            str(row[f"{d7fieldname}_format"])
+                        ]
+                        attributes.append(field_data)
             elif field_config["type"] == "list_text":
                 if d7fieldname in config["list_text_to_boolean"]:
                     attributes.append(
@@ -310,6 +372,48 @@ def create_field(
                 d9_taxonomy_term = tid_to_d9_taxonomy_term[row[f"{d7fieldname}_tid"]]
                 relationship_data["type"] = d9_taxonomy_term["data"]["type"]
                 relationship_data["id"] = d9_taxonomy_term["data"]["id"]
+                relationships.append(relationship_data)
+            elif field_config["type"] == "entityreference":
+                relationship_data = {}
+                d9_node = nid_to_d9_node[row[f"{d7fieldname}_target_id"]]
+                relationship_data["type"] = d9_node["data"]["type"]
+                relationship_data["id"] = d9_node["data"]["id"]
+                relationships.append(relationship_data)
+            elif field_config["type"] == "image":
+                path, filename = get_path_from_fid(
+                    connection, row[f"{d7fieldname}_fid"]
+                )
+                file_resp = post_image_file(
+                    path, filename, target, targetusername, targetpassword
+                )
+                media_image_data = {
+                    "data": {
+                        "attributes": {"name": filename},
+                        "type": "media--image",
+                        "relationships": {
+                            "field_media_image": {
+                                "data": {
+                                    "type": "file--file",
+                                    "id": file_resp["data"]["id"],
+                                    "meta": {
+                                        "alt": row[f"{d7fieldname}_alt"],
+                                    },
+                                }
+                            }
+                        },
+                    }
+                }
+                media_resp = post(
+                    media_image_data,
+                    "media",
+                    "image",
+                    target,
+                    targetusername,
+                    targetpassword,
+                )
+                relationship_data = {}
+                relationship_data["type"] = "media--image"
+                relationship_data["id"] = media_resp["data"]["id"]
                 relationships.append(relationship_data)
             else:
                 raise ValueError(
@@ -346,6 +450,11 @@ def clean_uri(uri, nid_to_d9_node):
     # Use qurl param to proxy instead of url
     if uri.startswith("https://proxy.library.carleton.ca/login?url="):
         uri = uri.replace("url", "qurl", 1)
+    # Fix help links
+    if uri.startswith("help/"):
+        uri = "internal:/" + uri
+    if uri.startswith("/help/"):
+        uri = "internal:/" + uri[1:]
     return uri
 
 
@@ -375,6 +484,32 @@ def post(obj, entity, bundle, target, targetusername, targetpassword):
         resp.raise_for_status()
     except requests.RequestException:
         click.echo(pprint.pformat(obj))
+        try:
+            click.echo(pprint.pformat(resp.json()))
+        except json.decoder.JSONDecodeError:
+            click.echo(resp.text)
+        raise
+    return resp.json()
+
+
+def post_image_file(path, filename, target, targetusername, targetpassword):
+    url = target + "/media/image/field_media_image"
+    headers = {
+        "Accept": "application/vnd.api+json",
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f'file; filename="{filename}"',
+    }
+    with open(path, "rb") as upload_file:
+        resp = requests.post(
+            url,
+            headers=headers,
+            data=upload_file,
+            auth=(targetusername, targetpassword),
+        )
+    try:
+        resp.raise_for_status()
+    except requests.RequestException:
+        click.echo(path)
         try:
             click.echo(pprint.pformat(resp.json()))
         except json.decoder.JSONDecodeError:
