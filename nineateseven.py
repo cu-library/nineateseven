@@ -72,6 +72,9 @@ def cli(
     # Mapping from D7 NIDs to newly created D9 nodes.
     nid_to_d9_node = {}
 
+    # Mapping from D7 NIDs to their bundle name.
+    nid_to_bundle_name = {}
+
     # Mapping from D7 TIDs to newly created D9 taxonomy terms.
     tid_to_d9_taxonomy_term = {}
 
@@ -126,6 +129,12 @@ def cli(
 
         for bundle in bundles:
             nodes = create_nodes(connection, bundle)
+            # For some bundles, we want to omit old nodes.
+            if bundle in cp["newer_than"]:
+                newer_than = datetime.datetime.strptime(
+                    cp["newer_than"]["news"], "%Y-%m-%dT%H:%M:%S"
+                )
+                nodes = [n for n in nodes if n["changed"] > newer_than]
             with click.progressbar(
                 nodes,
                 label=f"POSTing {bundle} nodes to target",
@@ -139,18 +148,21 @@ def cli(
                         node
                     )  # Progress bar can still use original node
                     del node["nid"]
+                    del node["changed"]
                     nid_to_d9_node[nid] = post(
                         node, "node", bundle, target, targetusername, targetpassword
                     )
+                    nid_to_bundle_name[nid] = bundle
 
-        for d7_fieldname, d9_fieldname in cp.items("field_mappings"):
+        for d7fieldname, d9fieldname in cp.items("field_mappings"):
             with click.progressbar(
                 nid_to_d9_node,
-                label=f"PATCHing {d7_fieldname}",
+                label=f"PATCHing {d7fieldname}",
                 item_show_func=lambda nid: str(nid) if nid is not None else "",
             ) as bar:
                 for nid in bar:
-                    field_config = fields[d7_fieldname]
+                    field_config = fields[d7fieldname]
+                    bundle = nid_to_bundle_name[nid]
                     field = create_field(
                         cp,
                         connection,
@@ -158,8 +170,8 @@ def cli(
                         nid,
                         nid_to_d9_node,
                         tid_to_d9_taxonomy_term,
-                        d7_fieldname,
-                        d9_fieldname,
+                        d7fieldname,
+                        d9fieldname,
                         field_config,
                         target,
                         targetusername,
@@ -231,6 +243,7 @@ def create_nodes(connection, bundle):
         for row in cursor:
             node = {
                 "nid": row["nid"],
+                "changed": datetime.datetime.fromtimestamp(row["changed"]),
                 "data": {"type": f"node--{bundle}", "attributes": {}},
             }
             node["data"]["attributes"]["langcode"] = "en"
@@ -351,6 +364,19 @@ def create_field(
                             str(row[f"{d7fieldname}_format"])
                         ]
                         attributes.append(field_data)
+            elif field_config["type"] == "text_with_summary":
+                if str(row[f"{d7fieldname}_format"]) != "0":
+                    field_data = {}
+                    field_data["value"] = clean_text(
+                        row[f"{d7fieldname}_value"], nid_to_d9_node
+                    )
+                    field_data["summary"] = clean_text(
+                        row[f"{d7fieldname}_summary"], nid_to_d9_node
+                    )
+                    field_data["format"] = config["text_format_mappings"][
+                        str(row[f"{d7fieldname}_format"])
+                    ]
+                    attributes.append(field_data)
             elif field_config["type"] == "list_text":
                 if d7fieldname in config["list_text_to_boolean"]:
                     attributes.append(
@@ -519,7 +545,7 @@ def post_image_file(path, filename, target, targetusername, targetpassword):
 
 
 def patch(obj, entity, bundle, target, targetusername, targetpassword):
-    # If the attributes of the field are blank, don't bother POSTing
+    # If the attributes of the field are blank, don't bother PATCHing
     if not obj["data"]["attributes"] and not obj["data"]["relationships"]:
         return
     url = target + "/" + entity + "/" + bundle + "/" + obj["data"]["id"]
