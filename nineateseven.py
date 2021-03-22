@@ -72,7 +72,7 @@ def cli(
     # Mapping from D7 NIDs to newly created D9 nodes.
     nid_to_d9_node = {}
 
-    # Mapping from D7 NIDs to their bundle name.
+    # Mapping from D7 NIDs to their D9 bundle name.
     nid_to_bundle_name = {}
 
     # Mapping from D7 TIDs to newly created D9 taxonomy terms.
@@ -128,13 +128,21 @@ def cli(
         fields = get_fields(connection)
 
         for bundle in bundles:
-            nodes = create_nodes(connection, bundle)
+            d9bundle = cp["node_bundle_map"].get(bundle, bundle)
+            nodes = create_nodes(connection, bundle, d9bundle)
             # For some bundles, we want to omit old nodes.
             if bundle in cp["newer_than"]:
                 newer_than = datetime.datetime.strptime(
                     cp["newer_than"]["news"], "%Y-%m-%dT%H:%M:%S"
                 )
                 nodes = [n for n in nodes if n["changed"] > newer_than]
+
+            if bundle in cp["node_bundle_page_type_map"]:
+                for node in nodes:
+                    node["data"]["attributes"]["field_page_page_type"] = cp[
+                        "node_bundle_page_type_map"
+                    ][bundle]
+
             with click.progressbar(
                 nodes,
                 label=f"POSTing {bundle} nodes to target",
@@ -150,9 +158,9 @@ def cli(
                     del node["nid"]
                     del node["changed"]
                     nid_to_d9_node[nid] = post(
-                        node, "node", bundle, target, targetusername, targetpassword
+                        node, "node", d9bundle, target, targetusername, targetpassword
                     )
-                    nid_to_bundle_name[nid] = bundle
+                    nid_to_bundle_name[nid] = d9bundle
 
         for d7fieldname, d9fieldname in cp.items("field_mappings"):
             with click.progressbar(
@@ -235,7 +243,7 @@ def create_taxonomy_terms(connection, d7_machine_name, d9_machine_name):
     return terms
 
 
-def create_nodes(connection, bundle):
+def create_nodes(connection, bundle, d9bundle):
     nodes = []
     with connection.cursor() as cursor:
         sql = "SELECT * FROM `node` WHERE `type`=%s"
@@ -244,7 +252,7 @@ def create_nodes(connection, bundle):
             node = {
                 "nid": row["nid"],
                 "changed": datetime.datetime.fromtimestamp(row["changed"]),
-                "data": {"type": f"node--{bundle}", "attributes": {}},
+                "data": {"type": f"node--{d9bundle}", "attributes": {}},
             }
             node["data"]["attributes"]["langcode"] = "en"
             node["data"]["attributes"]["title"] = row["title"].strip()
@@ -316,10 +324,10 @@ def create_field(
     with connection.cursor() as cursor:
         sql = (
             f"SELECT * FROM `field_data_{d7fieldname}` "
-            "WHERE `entity_type` = 'node' AND `bundle` = %s AND `entity_id` = %s "
+            "WHERE `entity_type` = 'node' AND `entity_id` = %s "
             "ORDER BY `delta`"
         )
-        cursor.execute(sql, (bundle, nid))
+        cursor.execute(sql, (nid,))
         attributes = []
         relationships = []
         for row in cursor:
