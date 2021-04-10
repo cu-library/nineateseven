@@ -171,20 +171,40 @@ def cli(
                 for nid in bar:
                     field_config = fields[d7fieldname]
                     bundle = nid_to_bundle_name[nid]
-                    field = create_field(
-                        cp,
-                        connection,
-                        bundle,
-                        nid,
-                        nid_to_d9_node,
-                        tid_to_d9_taxonomy_term,
-                        d7fieldname,
-                        d9fieldname,
-                        field_config,
-                        target,
-                        targetusername,
-                        targetpassword,
-                    )
+                    # For some entity reference nodes, we want to manually
+                    # target particular paragraphs.
+                    if (
+                        d7fieldname
+                        in cp["node_entity_reference_to_paragraph_library_item"]
+                    ):
+                        field = create_field_paragraph_library_item(
+                            cp,
+                            connection,
+                            bundle,
+                            nid,
+                            nid_to_d9_node,
+                            d7fieldname,
+                            d9fieldname,
+                            target,
+                            targetusername,
+                            targetpassword,
+                        )
+                    else:
+                        field = create_field(
+                            cp,
+                            connection,
+                            bundle,
+                            nid,
+                            nid_to_d9_node,
+                            tid_to_d9_taxonomy_term,
+                            d7fieldname,
+                            d9fieldname,
+                            field_config,
+                            target,
+                            targetusername,
+                            targetpassword,
+                        )
+
                     patch(
                         field,
                         "node",
@@ -455,6 +475,77 @@ def create_field(
                 )
         if attributes:
             field["data"]["attributes"][d9fieldname] = attributes
+        if relationships:
+            field["data"]["relationships"][d9fieldname] = {"data": relationships}
+    return field
+
+
+def create_field_paragraph_library_item(
+    config,
+    connection,
+    bundle,
+    nid,
+    nid_to_d9_node,
+    d7fieldname,
+    d9fieldname,
+    target,
+    targetusername,
+    targetpassword,
+):
+    field = {
+        "data": {
+            "type": f"node--{bundle}",
+            "id": nid_to_d9_node[nid]["data"]["id"],
+            "relationships": {},
+            "attributes": {},
+        }
+    }
+    with connection.cursor() as cursor:
+        sql = (
+            f"SELECT * FROM `field_data_{d7fieldname}` "
+            "WHERE `entity_type` = 'node' AND `entity_id` = %s "
+            "ORDER BY `delta`"
+        )
+        cursor.execute(sql, (nid,))
+        relationships = []
+        for row in cursor:
+            from_library = {
+                "data": {
+                    "attributes": {
+                        "parent_field_name": d9fieldname,
+                        "parent_id": nid_to_d9_node[nid]["data"]["attributes"][
+                            "drupal_internal__nid"
+                        ],
+                        "parent_type": "node",
+                    },
+                    "relationships": {
+                        "field_reusable_paragraph": {
+                            "data": {
+                                "id": config["node_to_paragraph_library_item_map"][str(row[f"{d7fieldname}_target_id"])],
+                                "type": "paragraphs_library_item--paragraphs_library_item",
+                            }
+                        }
+                    },
+                    "type": "paragraph--from_library",
+                }
+            }
+
+            new_from_library = post(
+                from_library,
+                "paragraph",
+                "from_library",
+                target,
+                targetusername,
+                targetpassword,
+            )
+            relationship_data = {}
+            relationship_data["type"] = "paragraph--from_library"
+            relationship_data["id"] = new_from_library["data"]["id"]
+            relationship_data["meta"] = {}
+            relationship_data["meta"]["target_revision_id"] = new_from_library["data"][
+                "attributes"
+            ]["drupal_internal__revision_id"]
+            relationships.append(relationship_data)
         if relationships:
             field["data"]["relationships"][d9fieldname] = {"data": relationships}
     return field
