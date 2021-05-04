@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """A CLI tool for migrating our Drupal 7 site to Drupal 9"""
 
+import api
 import click
-import pymysql
-import datetime
-import json
-import requests
-import pprint
 import configparser
-import copy
+import datetime
+import pymysql
 import re
+import sys
 
 CONTEXT_SETTINGS = {"auto_envvar_prefix": "NINEATESEVEN"}
 
@@ -22,7 +20,7 @@ CONTEXT_SETTINGS = {"auto_envvar_prefix": "NINEATESEVEN"}
 @click.option("--target", "-t", required=True)
 @click.option("--targetusername", "-tu", required=True)
 @click.option("--targetpassword", "-tp", required=True)
-@click.option("--config", "-c", type=click.File(), required=True)
+@click.option("--mapping", "-m", "mappingfile", type=click.File(), required=True)
 @click.option(
     "--disablesubjectaltnamewarning/--no-disablesubjectaltnamewarning", default=False
 )
@@ -35,7 +33,7 @@ def cli(
     target,
     targetusername,
     targetpassword,
-    config,
+    mappingfile,
     disablesubjectaltnamewarning,
     bundles,
 ):
@@ -48,6 +46,49 @@ def cli(
     click.echo(f"  Target JSON API: {target}")
     click.echo("")
 
+    # Pesky security warning particular to Carleton's environment.
+    if disablesubjectaltnamewarning:
+        import warnings
+        import urllib3
+
+        warnings.simplefilter("ignore", urllib3.exceptions.SubjectAltNameWarning)
+
+    for bundle in bundles:
+        # Exit early for unknown bundles.
+        if bundle not in [
+            "news",
+            "database",
+            "geospatial_data",
+            "policy",
+            "transcript",
+            "guide",
+            "service",
+            "help_guide",
+            "course_guide",
+            "collection_page",
+            "find_guide",
+            "page",
+            "survey_data",
+            "subject_detailed_guide",
+            "subject_quick_guide",
+        ]:
+            sys.exit(f"Unknown bundle name {bundle}")
+
+    # Read in the mapping file.
+    mapping = configparser.ConfigParser(interpolation=None)
+    mapping.read_file(mappingfile)
+
+    # Create the Drupal API object.
+    drupal = api.DrupalAPI(target, targetusername, targetpassword)
+    if not drupal.test():
+        sys.exit("Unable to connect to Drupal API.")
+
+    click.echo("Using mapping file to load existing D9 objects...", nl=False)
+    nid_to_existing_obj = load_objs_from_mapping(mapping, drupal)
+    click.echo("Done!")
+
+    nid_to_new_obj = {}
+
     # Connect to the local MySQL database.
     connection = pymysql.connect(
         host="localhost",
@@ -58,235 +99,1229 @@ def cli(
         cursorclass=pymysql.cursors.DictCursor,
     )
 
-    # Pesky security warning particular to Carleton's environment.
-    if disablesubjectaltnamewarning:
-        import warnings
-        import urllib3
-
-        warnings.simplefilter("ignore", urllib3.exceptions.SubjectAltNameWarning)
-
-    # Read in the config file.
-    cp = configparser.ConfigParser(interpolation=None)
-    cp.read_file(config)
-
-    # Mapping from D7 NIDs to newly created D9 nodes.
-    nid_to_d9_node = {}
-
-    # Mapping from D7 NIDs to their D9 bundle name.
-    nid_to_bundle_name = {}
-
-    # Mapping from D7 TIDs to newly created D9 taxonomy terms.
-    tid_to_d9_taxonomy_term = {}
-
     # Context manager around the connection, so it will be automatically closed.
     with connection:
-        # First, migrate the taxonomy terms.
-        # We migrate them first, because nodes might reference them.
-        # Iterate through the D7 machine names for taxonomy vocabularies and their
-        # corresponding D9 machine names
-        for d7_taxonomy_voc, d9_taxonomy_voc in cp.items("taxonomy_mappings"):
-            terms = create_taxonomy_terms(connection, d7_taxonomy_voc, d9_taxonomy_voc)
-            with click.progressbar(
-                length=len(terms),
-                label=f"POSTing taxonomy terms in {d7_taxonomy_voc}",
-            ) as bar:
-                # Iterate through a copy of the terms, processing terms
-                # which are at the root ("0" parent) or have a parent which
-                # is already processed.
-                # After processing a term, delete it from the terms list.
-                # Loop this process until all terms in the terms list have
-                # been processed.
-                while len(terms) > 0:
-                    this_pass_terms = terms.copy()
-                    for term in this_pass_terms:
-                        if (
-                            term["parent_tid"] == 0
-                            or term["parent_tid"] in tid_to_d9_taxonomy_term
-                        ):
-                            if term["parent_tid"] in tid_to_d9_taxonomy_term:
-                                term["data"]["relationships"]["parent"]["data"][
-                                    "id"
-                                ] = tid_to_d9_taxonomy_term[term["parent_tid"]]["data"][
-                                    "id"
-                                ]
-                            tid = term["tid"]
-                            # Delete tid and parent_tid from data to be POSTed.
-                            del term["tid"]
-                            del term["parent_tid"]
-                            tid_to_d9_taxonomy_term[tid] = post(
-                                term,
-                                "taxonomy_term",
-                                d9_taxonomy_voc,
-                                target,
-                                targetusername,
-                                targetpassword,
-                            )
-                            terms.remove(term)
-                            bar.update(1)
-
-        # Get field configs in D7 DB
-        fields = get_fields(connection)
-
         for bundle in bundles:
-            d9bundle = cp["node_bundle_map"].get(bundle, bundle)
-            nodes = create_nodes(connection, bundle, d9bundle)
-            # For some bundles, we want to omit old nodes.
-            if bundle in cp["newer_than"]:
-                newer_than = datetime.datetime.strptime(
-                    cp["newer_than"]["news"], "%Y-%m-%dT%H:%M:%S"
+            click.echo(f"{bundle}...", nl=False)
+            if bundle == "news":
+                nid_to_new_obj.update(migrate_news_nodes(connection, drupal, mapping))
+            elif bundle == "database":
+                nid_to_new_obj.update(
+                    migrate_database_nodes(connection, drupal, mapping)
                 )
-                nodes = [n for n in nodes if n["changed"] > newer_than]
+            elif bundle == "geospatial_data":
+                nid_to_new_obj.update(
+                    migrate_geospatial_data_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "policy":
+                nid_to_new_obj.update(migrate_policy_nodes(connection, drupal, mapping))
+            elif bundle == "transcript":
+                nid_to_new_obj.update(
+                    migrate_transcript_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "guide":
+                nid_to_new_obj.update(migrate_guide_nodes(connection, drupal, mapping))
+            elif bundle == "service":
+                nid_to_new_obj.update(
+                    migrate_service_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "help_guide":
+                nid_to_new_obj.update(
+                    migrate_help_guide_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "course_guide":
+                nid_to_new_obj.update(
+                    migrate_course_guide_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "collection_page":
+                nid_to_new_obj.update(
+                    migrate_collection_page_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "find_guide":
+                nid_to_new_obj.update(
+                    migrate_find_guide_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "page":
+                nid_to_new_obj.update(migrate_page_nodes(connection, drupal, mapping))
+            elif bundle == "survey_data":
+                nid_to_new_obj.update(
+                    migrate_survey_data_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "subject_detailed_guide":
+                nid_to_new_obj.update(
+                    migrate_subject_detailed_guide_nodes(connection, drupal, mapping)
+                )
+            elif bundle == "subject_quick_guide":
+                nid_to_new_obj.update(
+                    migrate_subject_quick_guide_nodes(connection, drupal, mapping)
+                )
+            click.echo("Done!")
 
-            if bundle in cp["node_bundle_page_type_map"]:
-                for node in nodes:
-                    node["data"]["attributes"]["field_page_page_type"] = cp[
-                        "node_bundle_page_type_map"
-                    ][bundle]
+        for nid, obj in nid_to_new_obj.items():
+            click.echo(f"{nid}...", nl=False)
+            node_type = load_type(connection, nid)
+            if node_type == "news":
+                migrate_news_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
+            elif node_type == "database":
+                migrate_database_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "geospatial_data":
+                migrate_geospatial_data_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "policy":
+                migrate_policy_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
+            elif node_type == "transcript":
+                migrate_transcript_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
 
-            with click.progressbar(
-                nodes,
-                label=f"POSTing {bundle} nodes to target",
-                item_show_func=lambda node: str(node["nid"])
-                if node is not None
-                else "",
-            ) as bar:
-                for node in bar:
-                    nid = node["nid"]
-                    node = copy.deepcopy(
-                        node
-                    )  # Progress bar can still use original node
-                    del node["nid"]
-                    del node["changed"]
-                    nid_to_d9_node[nid] = post(
-                        node, "node", d9bundle, target, targetusername, targetpassword
-                    )
-                    nid_to_bundle_name[nid] = d9bundle
+            elif node_type == "guide":
+                migrate_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            # The only books we migrate from node to node are now services.
+            elif node_type == "service" or node_type == "book":
+                migrate_service_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "help_guide":
+                migrate_help_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "course_guide":
+                migrate_course_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "collection_page":
+                migrate_collection_page_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "find_guide":
+                migrate_find_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
+            elif node_type == "page":
+                migrate_page_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
+            elif node_type == "survey_data":
+                migrate_survey_data_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                )
+            elif node_type == "subject_detailed_guide":
+                migrate_subject_detailed_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            elif node_type == "subject_quick_guide":
+                migrate_subject_quick_guide_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
+                )
+            click.echo("Done!")
 
-        for d7fieldname, d9fieldname in cp.items("field_mappings"):
-            with click.progressbar(
-                nid_to_d9_node,
-                label=f"PATCHing {d7fieldname}",
-                item_show_func=lambda nid: str(nid) if nid is not None else "",
-            ) as bar:
-                for nid in bar:
-                    field_config = fields[d7fieldname]
-                    bundle = nid_to_bundle_name[nid]
-                    # For some entity reference nodes, we want to manually
-                    # target particular paragraphs.
-                    if (
-                        d7fieldname
-                        in cp["node_entity_reference_to_paragraph_library_item"]
-                    ):
-                        field = create_field_paragraph_library_item(
-                            cp,
-                            connection,
-                            bundle,
-                            nid,
-                            nid_to_d9_node,
-                            d7fieldname,
-                            d9fieldname,
-                            target,
-                            targetusername,
-                            targetpassword,
-                        )
-                    else:
-                        field = create_field(
-                            cp,
-                            connection,
-                            bundle,
-                            nid,
-                            nid_to_d9_node,
-                            tid_to_d9_taxonomy_term,
-                            d7fieldname,
-                            d9fieldname,
-                            field_config,
-                            target,
-                            targetusername,
-                            targetpassword,
-                        )
+        click.echo("")
+        click.echo("")
+        click.echo("New d7 nid to uuid mappings")
+        for nid, obj in nid_to_new_obj.items():
+            click.echo(f"{nid} = {obj['data']['id']}")
+        click.echo("")
 
-                    patch(
-                        field,
-                        "node",
-                        bundle,
-                        target,
-                        targetusername,
-                        targetpassword,
-                    )
+        click.echo("New d7 nid to type mappings")
+        for nid, obj in nid_to_new_obj.items():
+            click.echo(f"{nid} = {obj['data']['type']}")
+        click.echo("")
 
 
-def get_fields(connection):
-    fields = {}
-    with connection.cursor() as cursor:
-        sql = "SELECT * FROM `field_config`"
-        cursor.execute(sql)
-        for row in cursor:
-            fields[row["field_name"]] = {"type": row["type"], "module": row["module"]}
-    return fields
+# News Nodes
 
 
-def create_taxonomy_terms(connection, d7_machine_name, d9_machine_name):
-    terms = []
-    with connection.cursor() as cursor:
-        sql = (
-            "SELECT `taxonomy_term_data`.`tid`, "
-            "       `taxonomy_term_data`.`name`, "
-            "       `taxonomy_term_hierarchy`.`parent` "
-            "FROM `taxonomy_vocabulary` "
-            "LEFT JOIN `taxonomy_term_data` "
-            "    ON `taxonomy_vocabulary`.`vid` = `taxonomy_term_data`.`vid` "
-            "LEFT JOIN `taxonomy_term_hierarchy` "
-            "    ON `taxonomy_term_data`.`tid` = `taxonomy_term_hierarchy`.`tid` "
-            "WHERE `taxonomy_vocabulary`.`machine_name` = %s"
+def migrate_news_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(connection, "news", "node--news", mapping)
+
+    # We don't want to migrate old news nodes.
+    cutoff = datetime.datetime(2020, 1, 1)
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if node_newer_than_cutoff(connection, nid, cutoff)
+        and str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_news_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # field_news_category
+    patch_ready_obj["data"]["attributes"]["field_news_category"] = news_category(
+        connection, nid
+    )
+
+    drupal.patch(patch_ready_obj)
+
+
+def news_category(connection, nid):
+    rows = load_field_data(connection, "field_news_category", nid)
+    news_category = []
+    for row in rows:
+        if row["field_news_category_tid"] == 1213:
+            news_category.append("Database Downtime")
+        elif row["field_news_category_tid"] == 1219:
+            news_category.append("New Databases")
+    return news_category
+
+
+# Database Nodes
+
+
+def migrate_database_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "database", "node--database", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_database_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Advisory
+    patch_ready_obj["data"]["attributes"][
+        "field_database_advisory"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_database_advisory", nid, nid_to_obj
+    )
+
+    # Alternate Spellings
+    patch_ready_obj["data"]["attributes"][
+        "field_database_alt_spellings"
+    ] = text_to_plain_text(connection, "field_alternate_spellings", nid)
+
+    # Alternate Titles
+    patch_ready_obj["data"]["attributes"][
+        "field_database_alternate_titles"
+    ] = text_to_plain_text(connection, "field_database_alternate_titles", nid)
+
+    # Author
+    patch_ready_obj["data"]["attributes"]["field_database_author"] = text_to_plain_text(
+        connection, "field_database_author", nid
+    )
+
+    # Authorized Users
+    patch_ready_obj["data"]["attributes"][
+        "field_database_authorized_users"
+    ] = text_list_to_text_list(connection, "field_database_authorized_users", nid)
+
+    # Brief Description
+    patch_ready_obj["data"]["attributes"][
+        "field_database_brief_description"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_database_brief_description", nid, nid_to_obj
+    )
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Date Coverage
+    patch_ready_obj["data"]["attributes"][
+        "field_database_date_coverage"
+    ] = text_to_plain_text(connection, "field_database_date_coverage", nid)
+
+    # Description
+    patch_ready_obj["data"]["attributes"][
+        "field_database_description"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_database_description", nid, nid_to_obj
+    )
+
+    # Fulltext
+    patch_ready_obj["data"]["attributes"][
+        "field_database_fulltext"
+    ] = database_fulltext(connection, nid)
+
+    # Important Details
+    patch_ready_obj["data"]["attributes"][
+        "field_database_important_details"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_database_notes", nid, nid_to_obj
+    )
+
+    # Link
+    patch_ready_obj["data"]["attributes"]["field_database_link"] = link_to_link(
+        connection, "field_database_link", nid, nid_to_obj
+    )
+
+    # Publisher
+    patch_ready_obj["data"]["attributes"][
+        "field_database_publisher"
+    ] = text_to_plain_text(connection, "field_database_publisher", nid)
+
+    # Subject
+    patch_ready_obj["data"]["relationships"]["field_database_subject"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_subject", nid, mapping
         )
-        cursor.execute(sql, (d7_machine_name,))
-        for row in cursor:
-            term = {
-                "tid": row["tid"],
-                "parent_tid": row["parent"],
-                "data": {
-                    "type": f"taxonomy_vocabulary--{d9_machine_name}",
-                    "attributes": {},
-                    "relationships": {
-                        "parent": {
-                            "data": {
-                                "type": f"taxonomy_term--{d9_machine_name}",
-                                "id": "virtual",
-                            },
-                        },
-                    },
-                },
-            }
-            term["data"]["attributes"]["langcode"] = "en"
-            term["data"]["attributes"]["name"] = row["name"].strip()
-            terms.append(term)
-    return terms
+    }
+
+    # Trial Feedback
+    patch_ready_obj["data"]["attributes"][
+        "field_database_trial_feedback"
+    ] = database_trial_feedback(connection, nid)
+
+    # Type
+    patch_ready_obj["data"]["relationships"]["field_database_type"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_database_type", nid, mapping
+        )
+    }
+
+    drupal.patch(patch_ready_obj)
 
 
-def create_nodes(connection, bundle, d9bundle):
-    nodes = []
+def database_fulltext(connection, nid):
+    rows = load_field_data(connection, "field_database_fulltext", nid)
+    for row in rows:
+        return row["field_database_fulltext_value"] == "Fulltext"
+    return False
+
+
+def database_trial_feedback(connection, nid):
+    rows = load_field_data(connection, "field_trial_feedback", nid)
+    for row in rows:
+        return row["field_trial_feedback_value"] == "yes"
+    return False
+
+
+# Geospatial Data Nodes
+
+
+def migrate_geospatial_data_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "geospatial_data", "node--geospatial_data", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_geospatial_data_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Authorized Users
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_authorized_user"
+    ] = text_list_to_text_list(connection, "field_gis_authorized_users", nid)
+
+    # Available Online
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_available_onlin"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_available_online", nid, nid_to_obj
+    )
+
+    # Available Themes
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_available_theme"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_available_themes", nid, nid_to_obj
+    )
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Data Format
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_data_format"
+    ] = link_to_link(connection, "field_gis_data_format", nid, nid_to_obj)
+
+    # Data Producer
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_data_producer"
+    ] = gis_author(connection, nid)
+
+    # Description
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_description"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_description", nid, nid_to_obj
+    )
+
+    # Disclaimer
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_disclaimer"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_disclaimer", nid, nid_to_obj
+    )
+
+    # Geographic Area
+    patch_ready_obj["data"]["relationships"]["field_geospatial_geographic_area"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_geo_data_geographic_area", nid, mapping
+        )
+    }
+
+    # GIS Topic
+    patch_ready_obj["data"]["relationships"]["field_geospatial_gis_topic"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_geo_data_gis_topic", nid, mapping
+        )
+    }
+
+    # Interactive Index
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_interactive_ind"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_interactive_index", nid, nid_to_obj
+    )
+
+    # Location
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_location"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_location", nid, nid_to_obj
+    )
+
+    # Other Metadata
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_other_metadata"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_other_metadata", nid, nid_to_obj
+    )
+
+    # Projection
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_projection"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_gis_projection", nid, nid_to_obj
+    )
+
+    # Publication Date
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_publication_dat"
+    ] = text_to_plain_text(connection, "field_gis_publication_date", nid)
+
+    # Related Databases
+    patch_ready_obj["data"]["relationships"]["field_related_databases"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_databases", nid, nid_to_obj
+        )
+    }
+
+    # Related Geospatial Data
+    patch_ready_obj["data"]["relationships"]["field_related_geospatial_data"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_gis_data", nid, nid_to_obj
+        )
+    }
+
+    # Related Help  field_related_help  Entity reference field_related_help
+    # TODO HERE
+
+    # Resolution
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_resolution"
+    ] = text_to_plain_text(connection, "field_gis_resolution", nid)
+
+    # Sample Image
+    patch_ready_obj["data"]["relationships"]["field_geospatial_sample_image"] = {
+        "data": image(connection, "field_gis_sample_image", drupal, nid)
+    }
+
+    # Scale
+    patch_ready_obj["data"]["attributes"][
+        "field_geospatial_scale"
+    ] = text_to_plain_text(connection, "field_gis_scale", nid)
+
+    drupal.patch(patch_ready_obj)
+
+
+def gis_author(connection, nid):
+    rows = load_field_data(connection, "field_gis_author", nid)
+    authors = []
+    for row in rows:
+        authors.append(row["field_gis_author_value"])
+    return {
+        "value": ", ".join(authors),
+        "format": "plain_text",
+    }
+
+
+# Policy Nodes
+
+
+def migrate_policy_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(connection, "policy", "node--page", mapping)
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_policy_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Content type
+    patch_ready_obj["data"]["attributes"]["field_content_type"] = "Policy"
+
+    drupal.patch(patch_ready_obj)
+
+
+# Transcript Nodes
+
+
+def migrate_transcript_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "transcript", "node--transcript", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_transcript_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    drupal.patch(patch_ready_obj)
+
+
+# Guide Nodes
+
+
+def migrate_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(connection, "guide", "node--guide", mapping)
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_guide_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Guide sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"] = {"data": []}
+
+    # - Body
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        text_with_summary_to_text_area_paragraph(
+            connection, "body", "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # - Field Guide Detailed Sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        detailed_guide_section_to_accordion_paragraph(
+            connection, "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # Guide Type
+    patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Help"
+
+    drupal.patch(patch_ready_obj)
+
+
+# Service Nodes
+
+
+def migrate_service_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "service", "node--service", mapping
+    )
+
+    books = load_objs_from_database(connection, "book", "node--service", mapping)
+    subpages = {}
+
+    for nid in nid_to_obj:
+        with connection.cursor() as cursor:
+            sql = "SELECT `nid` FROM `book` WHERE `bid`=%s"
+            cursor.execute(sql, (nid,))
+            for row in cursor:
+                if row["nid"] in books:
+                    subpages[row["nid"]] = books[row["nid"]]
+
+    nid_to_obj.update(subpages)
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_service_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Action Link
+    patch_ready_obj["data"]["attributes"]["field_service_action_link"] = link_to_link(
+        connection, "field_action_link", nid, nid_to_obj
+    )
+
+    # Body
+    node_type = load_type(connection, nid)
+    if node_type == "book":
+        patch_ready_obj["data"]["attributes"][
+            "body"
+        ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+    else:
+        patch_ready_obj["data"]["attributes"][
+            "body"
+        ] = formatted_text_to_formatted_text(
+            connection, "field_full_description", nid, nid_to_obj
+        )
+
+    # Contact / Service point
+    patch_ready_obj["data"]["relationships"]["field_contact_service_point"] = {
+        "data": contact_service_point(connection, drupal, nid, nid_to_obj)
+    }
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Eligibility
+    patch_ready_obj["data"]["attributes"]["field_eligibility"] = text_list_to_text_list(
+        connection, "field_service_eligibility", nid
+    )
+
+    # Service Category
+    patch_ready_obj["data"]["relationships"]["field_service_category"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_service_category", nid, mapping
+        )
+    }
+
+    # Short description
+    patch_ready_obj["data"]["attributes"][
+        "field_short_description"
+    ] = formatted_text_to_formatted_text(
+        connection, "field_brief_description", nid, nid_to_obj
+    )
+
+    drupal.patch(patch_ready_obj)
+
+
+# Help Guides Nodes
+
+
+def migrate_help_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "help_guide", "node--guide", mapping
+    )
+
+    for nid in nid_to_obj:
+        try:
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
+                "/guides" + nid_to_obj[nid]["data"]["attributes"]["path"]["alias"]
+            )
+        except KeyError:
+            pass
+
+    do_not_migrate = [
+        "113",
+        "114",
+        "12647",
+        "12648",
+        "12649",
+        "12650",
+        "12651",
+        "12652",
+        "12652",
+        "12653",
+        "12654",
+        "12655",
+        "12821",
+        "12822",
+        "12823",
+        "12824",
+        "12825",
+        "12826",
+        "12844",
+        "12845",
+        "12846",
+        "12900",
+        "12901",
+        "12908",
+        "12909",
+        "12910",
+        "12911",
+        "12912",
+        "12913",
+        "13073",
+        "13074",
+        "13076",
+        "13169",
+        "15476",
+        "15477",
+        "15480",
+        "15481",
+        "15482",
+        "15483",
+        "15484",
+        "15485",
+        "15486",
+        "15487",
+        "15488",
+        "15506",
+        "15509",
+        "15510",
+        "15511",
+        "15513",
+        "15514",
+        "15515",
+        "15516",
+        "15517",
+        "15518",
+        "15519",
+        "15669",
+        "15670",
+        "15672",
+        "15674",
+        "15675",
+        "15676",
+        "15679",
+        "15680",
+        "15681",
+        "15682",
+        "15683",
+        "15685",
+        "15686",
+        "15687",
+        "15688",
+        "15690",
+        "15691",
+        "15694",
+        "15695",
+        "15696",
+        "15697",
+        "15698",
+    ]
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+        and str(nid) not in do_not_migrate
+    }
+
+
+def migrate_help_guide_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Guide sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"] = {"data": []}
+
+    # - Body
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        text_with_summary_to_text_area_paragraph(
+            connection, "body", "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # - Subpages
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        subpage_to_accordion_paragraph(
+            connection, "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # Guide Type
+    patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Help"
+
+    # TODO Add redirects from children to new anchored accordions.
+    # /help/[parent-title]/[child-title] becomes
+    # /guides/help/[parent-title]#[child-title]
+
+    drupal.patch(patch_ready_obj)
+
+
+# Course Guides Nodes
+
+
+def migrate_course_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "course_guide", "node--guide", mapping
+    )
+
+    for nid in nid_to_obj:
+        try:
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
+                "/guides" + nid_to_obj[nid]["data"]["attributes"]["path"]["alias"]
+            )
+        except KeyError:
+            pass
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_course_guide_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Guide sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"] = {"data": []}
+
+    # - Body
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        text_with_summary_to_text_area_paragraph(
+            connection, "body", "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # - Subpages
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        subpage_to_accordion_paragraph(
+            connection, "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # Guide Type
+    patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Course"
+
+    # TODO Add redirects from children to new anchored accordions.
+    # /research/course-guides/[parent-title]/[child-title] becomes
+    # /guides/course/[parent-title]#[child-title]
+
+    drupal.patch(patch_ready_obj)
+
+
+# Collection Page Nodes
+
+
+def migrate_collection_page_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "collection_page", "node--collection_page", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_collection_page_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Collection
+    patch_ready_obj["data"]["relationships"]["field_collection_page_collection"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_collection", nid, mapping
+        )
+    }
+
+    # Contact / Service point
+    patch_ready_obj["data"]["relationships"]["field_contact_service_point"] = {
+        "data": contact_service_point(connection, drupal, nid, nid_to_obj)
+    }
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    drupal.patch(patch_ready_obj)
+
+
+# Find Guide Nodes
+
+
+def migrate_find_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "find_guide", "node--find", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_find_guide_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Contact / Service point
+    patch_ready_obj["data"]["relationships"]["field_contact_service_point"] = {
+        "data": contact_service_point(connection, drupal, nid, nid_to_obj)
+    }
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    drupal.patch(patch_ready_obj)
+
+
+# Page Nodes
+
+
+def migrate_page_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(connection, "page", "node--page", mapping)
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_page_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    drupal.patch(patch_ready_obj)
+
+
+# Survey Data Nodes
+
+
+def migrate_survey_data_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "survey_data", "node--page", mapping
+    )
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_survey_data_fields(connection, drupal, nid, obj, nid_to_obj):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Content type
+    patch_ready_obj["data"]["attributes"]["field_content_type"] = "SurveyData"
+
+    drupal.patch(patch_ready_obj)
+
+
+# Detailed Subject Guide Nodes
+
+
+def migrate_subject_detailed_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "subject_detailed_guide", "node--guide", mapping
+    )
+
+    for nid in nid_to_obj:
+        try:
+            title = nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].split("/")[
+                3
+            ][:-15]
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
+                "/guides/subject/" + title
+            )
+        except KeyError:
+            pass
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_subject_detailed_guide_fields(
+    connection, drupal, nid, obj, nid_to_obj, mapping
+):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Guide sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"] = {"data": []}
+
+    # - Body
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        text_with_summary_to_text_area_paragraph(
+            connection, "body", "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # - Field Guide Detailed Sections
+    patch_ready_obj["data"]["relationships"]["field_guide_section"]["data"].extend(
+        detailed_guide_section_to_accordion_paragraph(
+            connection, "field_guide_section", drupal, nid, nid_to_obj
+        )
+    )
+
+    # Guide Type
+    patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Subject"
+
+    # Subject Category
+    patch_ready_obj["data"]["relationships"]["field_guide_subject_category"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_subject_category", nid, mapping
+        )
+    }
+
+    drupal.patch(patch_ready_obj)
+
+
+# Quick Subject Guide Nodes
+
+
+def migrate_subject_quick_guide_nodes(connection, drupal, mapping):
+    nid_to_obj = load_objs_from_database(
+        connection, "subject_quick_guide", "node--guide", mapping
+    )
+
+    for nid in nid_to_obj:
+        try:
+            title = nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].split("/")[
+                3
+            ][:-12]
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
+                "/guides/subject/" + title
+            )
+        except KeyError:
+            pass
+
+    return {
+        nid: drupal.post(obj)
+        for nid, obj in nid_to_obj.items()
+        if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+    }
+
+
+def migrate_subject_quick_guide_fields(
+    connection, drupal, nid, obj, nid_to_obj, mapping
+):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
+
+    # Guide sections
+    patch_ready_obj["data"]["relationships"]["field_key_resources"] = {"data": []}
+
+    # - Field Guide Key Resources
+    patch_ready_obj["data"]["relationships"]["field_key_resources"]["data"].extend(
+        key_resources_to_key_resources_paragraph(
+            connection, "field_key_resources", drupal, nid, nid_to_obj
+        )
+    )
+
+    # Guide Type
+    patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Subject"
+
+    # Subject Category
+    patch_ready_obj["data"]["relationships"]["field_guide_subject_category"] = {
+        "data": taxonomy_term_reference_to_taxonomy_term_reference(
+            connection, "field_subject_category", nid, mapping
+        )
+    }
+
+    drupal.patch(patch_ready_obj)
+
+
+# Common
+
+
+def load_objs_from_database(connection, bundle, d9type, mapping):
+    nid_to_obj = {}
     with connection.cursor() as cursor:
         sql = "SELECT * FROM `node` WHERE `type`=%s"
         cursor.execute(sql, (bundle,))
         for row in cursor:
-            node = {
-                "nid": row["nid"],
-                "changed": datetime.datetime.fromtimestamp(row["changed"]),
-                "data": {"type": f"node--{d9bundle}", "attributes": {}},
-            }
-            node["data"]["attributes"]["langcode"] = "en"
-            node["data"]["attributes"]["title"] = row["title"].strip()
-            node["data"]["attributes"]["status"] = row["status"] == 1
-            node["data"]["attributes"]["promote"] = row["promote"] == 1
-            node["data"]["attributes"]["sticky"] = row["sticky"] == 1
-            node["data"]["attributes"]["created"] = datetime.datetime.fromtimestamp(
+            obj = build_obj(d9type)
+            obj["data"]["attributes"]["langcode"] = "en"
+            obj["data"]["attributes"]["title"] = row["title"].strip()
+            obj["data"]["attributes"]["status"] = row["status"] == 1
+            obj["data"]["attributes"]["promote"] = row["promote"] == 1
+            obj["data"]["attributes"]["sticky"] = row["sticky"] == 1
+            obj["data"]["attributes"]["created"] = datetime.datetime.fromtimestamp(
                 row["created"], tz=datetime.timezone.utc
             ).isoformat()
             alias = get_path_alias(connection, row["nid"])
             if alias:
-                node["data"]["attributes"]["path"] = {"alias": alias}
-            nodes.append(node)
-    return nodes
+                obj["data"]["attributes"]["path"] = {"alias": alias}
+            if str(row["uid"]) not in mapping["users"]:
+                print(
+                    f"{row['nid']} author uid {row['uid']} is not in the mapping",
+                    file=sys.stderr,
+                )
+            else:
+                obj["data"]["relationships"]["uid"] = {
+                    "data": {
+                        "type": "user--user",
+                        "id": mapping["users"][str(row["uid"])],
+                    }
+                }
+            nid_to_obj[row["nid"]] = obj
+    return nid_to_obj
 
 
 def get_path_alias(connection, nid):
@@ -319,239 +1354,33 @@ def get_path_from_fid(connection, fid):
         )
 
 
-def create_field(
-    config,
-    connection,
-    bundle,
-    nid,
-    nid_to_d9_node,
-    tid_to_d9_taxonomy_term,
-    d7fieldname,
-    d9fieldname,
-    field_config,
-    target,
-    targetusername,
-    targetpassword,
-):
-    field = {
+def build_obj(d9type, uuid=None):
+    obj = {
         "data": {
-            "type": f"node--{bundle}",
-            "id": nid_to_d9_node[nid]["data"]["id"],
+            "type": d9type,
             "attributes": {},
             "relationships": {},
-        }
+        },
     }
-    with connection.cursor() as cursor:
-        sql = (
-            f"SELECT * FROM `field_data_{d7fieldname}` "
-            "WHERE `entity_type` = 'node' AND `entity_id` = %s "
-            "ORDER BY `delta`"
-        )
-        cursor.execute(sql, (nid,))
-        attributes = []
-        relationships = []
-        for row in cursor:
-            if field_config["type"] == "link_field":
-                field_data = {}
-                field_data["uri"] = clean_uri(row[f"{d7fieldname}_url"], nid_to_d9_node)
-                if field_data["uri"] == "":
-                    field_data["uri"] = "route:<nolink>"
-                field_data["title"] = row[f"{d7fieldname}_title"]
-                attributes.append(field_data)
-            elif field_config["type"] == "text" or field_config["type"] == "text_long":
-                if (
-                    d7fieldname in config["concatinate_text_field"]
-                    and len(attributes) > 0
-                ):
-                    if row[f"{d7fieldname}_format"] is None:
-                        attributes[0] = (
-                            attributes[0]
-                            + config["concatinate_text_field"][d7fieldname]
-                            + row[f"{d7fieldname}_value"]
-                        )
-                    else:
-                        attributes[0]["value"] = (
-                            attributes[0]["value"]
-                            + config["concatinate_text_field"][d7fieldname]
-                            + row[f"{d7fieldname}_value"]
-                        )
-                else:
-                    # If the d7 text field has a null format,
-                    # the d9 text field is plain.
-                    if (
-                        row[f"{d7fieldname}_format"] is None
-                        or d7fieldname in config["formatted_to_plain"]
-                    ):
-                        attributes.append(row[f"{d7fieldname}_value"])
-                    else:
-                        field_data = {}
-                        field_data["value"] = clean_text(
-                            row[f"{d7fieldname}_value"], nid_to_d9_node
-                        )
-                        field_data["format"] = config["text_format_mappings"][
-                            str(row[f"{d7fieldname}_format"])
-                        ]
-                        attributes.append(field_data)
-            elif field_config["type"] == "text_with_summary":
-                if str(row[f"{d7fieldname}_format"]) != "0":
-                    field_data = {}
-                    field_data["value"] = clean_text(
-                        row[f"{d7fieldname}_value"], nid_to_d9_node
-                    )
-                    field_data["summary"] = clean_text(
-                        row[f"{d7fieldname}_summary"], nid_to_d9_node
-                    )
-                    field_data["format"] = config["text_format_mappings"][
-                        str(row[f"{d7fieldname}_format"])
-                    ]
-                    attributes.append(field_data)
-            elif field_config["type"] == "list_text":
-                if d7fieldname in config["list_text_to_boolean"]:
-                    attributes.append(
-                        str(row[f"{d7fieldname}_value"]).strip()
-                        == config["list_text_to_boolean"][d7fieldname]
-                    )
-                else:
-                    attributes.append(row[f"{d7fieldname}_value"])
-            elif field_config["type"] == "datetime":
-                attributes.append(
-                    row[f"{d7fieldname}_value"].strftime(
-                        config["date_format_mappings"][d7fieldname]
-                    )
-                )
-            elif field_config["type"] == "list_boolean":
-                attributes.append(bool(row[f"{d7fieldname}_value"]))
-            elif field_config["type"] == "taxonomy_term_reference":
-                relationship_data = {}
-                d9_taxonomy_term = tid_to_d9_taxonomy_term[row[f"{d7fieldname}_tid"]]
-                relationship_data["type"] = d9_taxonomy_term["data"]["type"]
-                relationship_data["id"] = d9_taxonomy_term["data"]["id"]
-                relationships.append(relationship_data)
-            elif field_config["type"] == "entityreference":
-                relationship_data = {}
-                d9_node = nid_to_d9_node[row[f"{d7fieldname}_target_id"]]
-                relationship_data["type"] = d9_node["data"]["type"]
-                relationship_data["id"] = d9_node["data"]["id"]
-                relationships.append(relationship_data)
-            elif field_config["type"] == "image":
-                path, filename = get_path_from_fid(
-                    connection, row[f"{d7fieldname}_fid"]
-                )
-                file_resp = post_image_file(
-                    path, filename, target, targetusername, targetpassword
-                )
-                media_image_data = {
-                    "data": {
-                        "attributes": {"name": filename},
-                        "type": "media--image",
-                        "relationships": {
-                            "field_media_image": {
-                                "data": {
-                                    "type": "file--file",
-                                    "id": file_resp["data"]["id"],
-                                    "meta": {
-                                        "alt": row[f"{d7fieldname}_alt"],
-                                    },
-                                }
-                            }
-                        },
-                    }
-                }
-                media_resp = post(
-                    media_image_data,
-                    "media",
-                    "image",
-                    target,
-                    targetusername,
-                    targetpassword,
-                )
-                relationship_data = {}
-                relationship_data["type"] = "media--image"
-                relationship_data["id"] = media_resp["data"]["id"]
-                relationships.append(relationship_data)
-            else:
-                raise ValueError(
-                    f"Unexpected field type encountered: {field_config['type']}"
-                )
-        if attributes:
-            field["data"]["attributes"][d9fieldname] = attributes
-        if relationships:
-            field["data"]["relationships"][d9fieldname] = {"data": relationships}
-    return field
+    if uuid is not None:
+        obj["data"]["id"] = uuid
+    return obj
 
 
-def create_field_paragraph_library_item(
-    config,
-    connection,
-    bundle,
-    nid,
-    nid_to_d9_node,
-    d7fieldname,
-    d9fieldname,
-    target,
-    targetusername,
-    targetpassword,
-):
-    field = {
-        "data": {
-            "type": f"node--{bundle}",
-            "id": nid_to_d9_node[nid]["data"]["id"],
-            "relationships": {},
-            "attributes": {},
-        }
-    }
-    with connection.cursor() as cursor:
-        sql = (
-            f"SELECT * FROM `field_data_{d7fieldname}` "
-            "WHERE `entity_type` = 'node' AND `entity_id` = %s "
-            "ORDER BY `delta`"
-        )
-        cursor.execute(sql, (nid,))
-        relationships = []
-        for row in cursor:
-            from_library = {
-                "data": {
-                    "attributes": {
-                        "parent_field_name": d9fieldname,
-                        "parent_id": nid_to_d9_node[nid]["data"]["attributes"][
-                            "drupal_internal__nid"
-                        ],
-                        "parent_type": "node",
-                    },
-                    "relationships": {
-                        "field_reusable_paragraph": {
-                            "data": {
-                                "id": config["node_to_paragraph_library_item_map"][str(row[f"{d7fieldname}_target_id"])],
-                                "type": "paragraphs_library_item--paragraphs_library_item",
-                            }
-                        }
-                    },
-                    "type": "paragraph--from_library",
-                }
-            }
-
-            new_from_library = post(
-                from_library,
-                "paragraph",
-                "from_library",
-                target,
-                targetusername,
-                targetpassword,
+def load_objs_from_mapping(mapping, drupal):
+    nid_to_obj = {}
+    for nid, uuid in mapping["d7_nid_to_d9_uuid"].items():
+        if nid not in mapping["d7_nid_to_d9_type"]:
+            sys.exit(
+                f"Error in mapping file - missing {nid} in 'd7_nid_to_d9_type' section."
             )
-            relationship_data = {}
-            relationship_data["type"] = "paragraph--from_library"
-            relationship_data["id"] = new_from_library["data"]["id"]
-            relationship_data["meta"] = {}
-            relationship_data["meta"]["target_revision_id"] = new_from_library["data"][
-                "attributes"
-            ]["drupal_internal__revision_id"]
-            relationships.append(relationship_data)
-        if relationships:
-            field["data"]["relationships"][d9fieldname] = {"data": relationships}
-    return field
+        obj = build_obj(mapping["d7_nid_to_d9_type"][nid], uuid)
+        obj = drupal.get(obj)
+        nid_to_obj[int(nid)] = obj
+    return nid_to_obj
 
 
-def clean_uri(uri, nid_to_d9_node):
+def clean_uri(uri, nid_to_obj, originating_nid):
     # Normalize all internal links
     if uri.startswith("node/"):
         uri = "https://library.carleton.ca/" + uri
@@ -562,13 +1391,14 @@ def clean_uri(uri, nid_to_d9_node):
         if nid[-1] == "/":
             nid = nid[:-1]
         try:
-            d9node = nid_to_d9_node[int(nid)]
+            obj = nid_to_obj[int(nid)]
         except KeyError:
-            click.echo(f"WARNING: Unable to find D9 Node for {nid}.")
-            d9node = {"data": {"attributes": {"drupal_internal__nid": "fourohfour"}}}
-        uri = "internal:/node/" + str(
-            d9node["data"]["attributes"]["drupal_internal__nid"]
-        )
+            print(
+                f"WARNING: Unable to find D9 Node for {nid} in {originating_nid}.",
+                file=sys.stderr,
+            )
+            obj = {"data": {"attributes": {"drupal_internal__nid": "fourohfour"}}}
+        uri = "internal:/node/" + str(obj["data"]["attributes"]["drupal_internal__nid"])
     # Ensure all links to proxy are https
     if uri.startswith("proxy.library.carleton.ca"):
         uri = "https://" + uri
@@ -583,87 +1413,384 @@ def clean_uri(uri, nid_to_d9_node):
     return uri
 
 
-def clean_text(value, nid_to_d9_node):
+def clean_text(value, nid_to_obj, nid):
     # Pass any links through the clean_uri function
     re.sub(
         r'href="(?P<href>[^"]+)"',
-        lambda m: 'href="' + clean_uri(m.group("href"), nid_to_d9_node) + '"',
+        lambda m: 'href="' + clean_uri(m.group("href"), nid_to_obj, nid) + '"',
         value,
     )
     return value
 
 
-def post(obj, entity, bundle, target, targetusername, targetpassword):
-    url = target + "/" + entity + "/" + bundle
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
-    }
-    resp = requests.post(
-        url,
-        headers=headers,
-        data=json.dumps(obj),
-        auth=(targetusername, targetpassword),
-    )
-    try:
-        resp.raise_for_status()
-    except requests.RequestException:
-        click.echo(pprint.pformat(obj))
-        try:
-            click.echo(pprint.pformat(resp.json()))
-        except json.decoder.JSONDecodeError:
-            click.echo(resp.text)
-        raise
-    return resp.json()
-
-
-def post_image_file(path, filename, target, targetusername, targetpassword):
-    url = target + "/media/image/field_media_image"
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/octet-stream",
-        "Content-Disposition": f'file; filename="{filename}"',
-    }
-    with open(path, "rb") as upload_file:
-        resp = requests.post(
-            url,
-            headers=headers,
-            data=upload_file,
-            auth=(targetusername, targetpassword),
+def text_with_summary_to_text_with_summary(connection, fieldname, nid, nid_to_obj):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field.append(
+            {
+                "value": clean_text(row[f"{fieldname}_value"], nid_to_obj, nid),
+                "summary": clean_text(row[f"{fieldname}_summary"], nid_to_obj, nid),
+                "format": convert_text_format(row[f"{fieldname}_format"]),
+            }
         )
-    try:
-        resp.raise_for_status()
-    except requests.RequestException:
-        click.echo(path)
-        try:
-            click.echo(pprint.pformat(resp.json()))
-        except json.decoder.JSONDecodeError:
-            click.echo(resp.text)
-        raise
-    return resp.json()
+    return field
 
 
-def patch(obj, entity, bundle, target, targetusername, targetpassword):
-    # If the attributes of the field are blank, don't bother PATCHing
-    if not obj["data"]["attributes"] and not obj["data"]["relationships"]:
-        return
-    url = target + "/" + entity + "/" + bundle + "/" + obj["data"]["id"]
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
-    }
-    resp = requests.patch(
-        url,
-        headers=headers,
-        data=json.dumps(obj),
-        auth=(targetusername, targetpassword),
-    )
-    try:
-        resp.raise_for_status()
-    except requests.RequestException:
-        click.echo(pprint.pformat(obj))
-        try:
-            click.echo(pprint.pformat(resp.json()))
-        except json.decoder.JSONDecodeError:
-            click.echo(resp.text)
-        raise
+def formatted_text_to_formatted_text(connection, fieldname, nid, nid_to_obj):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field.append(
+            {
+                "value": clean_text(row[f"{fieldname}_value"], nid_to_obj, nid),
+                "format": convert_text_format(row[f"{fieldname}_format"]),
+            }
+        )
+    return field
+
+
+def text_to_plain_text(connection, fieldname, nid):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field.append(row[f"{fieldname}_value"])
+    return field
+
+
+def text_list_to_text_list(connection, fieldname, nid):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field.append(row[f"{fieldname}_value"])
+    return field
+
+
+def link_to_link(connection, fieldname, nid, nid_to_obj):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field_data = {
+            "uri": clean_uri(row[f"{fieldname}_url"], nid_to_obj, nid),
+            "title": row[f"{fieldname}_title"],
+        }
+        if field_data["uri"] == "":
+            field_data["uri"] = "route:<nolink>"
+        field.append(field_data)
+    return field
+
+
+def content_reviewed(connection, nid):
+    rows = load_field_data(connection, "field_content_reviewed", nid)
+    field = []
+    for row in rows:
+        field.append(row["field_content_reviewed_value"].strftime("%Y-%m-%d"))
+    return field
+
+
+def image(connection, fieldname, drupal, nid):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        path, filename = get_path_from_fid(connection, row[f"{fieldname}_fid"])
+        file_resp = drupal.post_file(
+            path, filename, "media", "image", "field_media_image"
+        )
+        media_image = build_obj("media--image")
+        media_image["data"]["attributes"]["name"] = filename
+        media_image["data"]["relationships"]["field_media_image"] = {
+            "data": {
+                "type": "file--file",
+                "id": file_resp["data"]["id"],
+                "meta": {
+                    "alt": row[f"{fieldname}_alt"],
+                },
+            }
+        }
+        media_image = drupal.post(media_image)
+        field.append(
+            {
+                "type": "media--image",
+                "id": media_image["data"]["id"],
+            }
+        )
+    return field
+
+
+def taxonomy_term_reference_to_taxonomy_term_reference(
+    connection, fieldname, nid, mapping
+):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        tid = str(row[f"{fieldname}_tid"])
+        field.append(
+            {
+                "id": mapping["d7_tid_to_d9_uuid"][tid],
+                "type": mapping["d7_tid_to_d9_taxonomy_type"][tid],
+            }
+        )
+    return field
+
+
+def entity_reference_to_entity_reference(connection, fieldname, nid, nid_to_obj):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        field.append(
+            {
+                "id": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["id"],
+                "type": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["type"],
+            }
+        )
+    return field
+
+
+def text_with_summary_to_text_area_paragraph(
+    connection, fieldname, parent_field_name, drupal, nid, nid_to_obj
+):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        paragraph = build_obj("paragraph--text_area")
+        paragraph["data"]["attributes"]["parent_id"] = nid_to_obj[nid]["data"][
+            "attributes"
+        ]["drupal_internal__nid"]
+        paragraph["data"]["attributes"]["parent_type"] = "node"
+        paragraph["data"]["attributes"]["parent_field_name"] = parent_field_name
+        paragraph["data"]["attributes"]["field_text"] = {
+            "value": clean_text(row[f"{fieldname}_value"], nid_to_obj, nid),
+            "format": convert_text_format(row[f"{fieldname}_format"]),
+        }
+        paragraph = drupal.post(paragraph)
+        field.append(
+            {
+                "type": "paragraph--text_area",
+                "id": paragraph["data"]["id"],
+                "meta": {
+                    "target_revision_id": paragraph["data"]["attributes"][
+                        "drupal_internal__revision_id"
+                    ]
+                },
+            }
+        )
+    return field
+
+
+def detailed_guide_section_to_accordion_paragraph(
+    connection, parent_field_name, drupal, nid, nid_to_obj
+):
+    rows = load_field_data(connection, "field_detailed_guide_section", nid)
+    field = []
+    for row in rows:
+
+        paragraph = build_obj("paragraph--accordion")
+        paragraph["data"]["attributes"]["parent_id"] = nid_to_obj[nid]["data"][
+            "attributes"
+        ]["drupal_internal__nid"]
+        paragraph["data"]["attributes"]["parent_type"] = "node"
+        paragraph["data"]["attributes"]["parent_field_name"] = parent_field_name
+
+        paragraph["data"]["attributes"]["field_accordion_title"] = text_to_plain_text(
+            connection,
+            "field_detailed_guide_section_lab",
+            row["field_detailed_guide_section_value"],
+        )
+
+        paragraph["data"]["attributes"][
+            "field_text"
+        ] = formatted_text_to_formatted_text(
+            connection,
+            "field_detailed_guide_section_bla",
+            row["field_detailed_guide_section_value"],
+            nid_to_obj,
+        )
+
+        paragraph = drupal.post(paragraph)
+        field.append(
+            {
+                "type": "paragraph--accordion",
+                "id": paragraph["data"]["id"],
+                "meta": {
+                    "target_revision_id": paragraph["data"]["attributes"][
+                        "drupal_internal__revision_id"
+                    ]
+                },
+            }
+        )
+    return field
+
+
+def subpage_to_accordion_paragraph(
+    connection, parent_field_name, drupal, nid, nid_to_obj
+):
+    rows = load_subpage_data(connection, nid)
+    field = []
+    for row in rows:
+        paragraph = build_obj("paragraph--accordion")
+        paragraph["data"]["attributes"]["parent_id"] = nid_to_obj[nid]["data"][
+            "attributes"
+        ]["drupal_internal__nid"]
+        paragraph["data"]["attributes"]["parent_type"] = "node"
+        paragraph["data"]["attributes"]["parent_field_name"] = parent_field_name
+        paragraph["data"]["attributes"]["field_accordion_title"] = row["title"]
+
+        paragraph["data"]["attributes"][
+            "field_text"
+        ] = formatted_text_to_formatted_text(connection, "body", row["nid"], nid_to_obj)
+
+        paragraph = drupal.post(paragraph)
+        field.append(
+            {
+                "type": "paragraph--accordion",
+                "id": paragraph["data"]["id"],
+                "meta": {
+                    "target_revision_id": paragraph["data"]["attributes"][
+                        "drupal_internal__revision_id"
+                    ]
+                },
+            }
+        )
+    return field
+
+
+def key_resources_to_key_resources_paragraph(
+    connection, parent_field_name, drupal, nid, nid_to_obj
+):
+    rows = load_field_data(connection, "field_key_resources", nid)
+    field = []
+    for row in rows:
+
+        paragraph = build_obj("paragraph--key_resources")
+        paragraph["data"]["attributes"]["parent_id"] = nid_to_obj[nid]["data"][
+            "attributes"
+        ]["drupal_internal__nid"]
+        paragraph["data"]["attributes"]["parent_type"] = "node"
+        paragraph["data"]["attributes"]["parent_field_name"] = parent_field_name
+
+        paragraph["data"]["attributes"][
+            "field_key_resource_annotation"
+        ] = text_to_plain_text(
+            connection,
+            "field_key_resource_annotation",
+            row["field_key_resources_value"],
+        )
+
+        paragraph["data"]["relationships"]["field_another_database"] = {
+            "data": entity_reference_to_entity_reference(
+                connection,
+                "field_key_resource_databases",
+                row["field_key_resources_value"],
+                nid_to_obj,
+            )
+        }
+
+        paragraph["data"]["attributes"]["field_key_resource_link"] = link_to_link(
+            connection,
+            "field_key_resource_link",
+            row["field_key_resources_value"],
+            nid_to_obj,
+        )
+
+        paragraph = drupal.post(paragraph)
+        field.append(
+            {
+                "type": "paragraph--key_resources",
+                "id": paragraph["data"]["id"],
+                "meta": {
+                    "target_revision_id": paragraph["data"]["attributes"][
+                        "drupal_internal__revision_id"
+                    ]
+                },
+            }
+        )
+    return field
+
+
+def contact_service_point(connection, drupal, nid, nid_to_obj):
+    rows = load_field_data(connection, "field_service_point", nid)
+    from_library_paragraphs = []
+    for row in rows:
+        paragraph = build_obj("paragraph--from_library")
+        paragraph["data"]["attributes"]["parent_id"] = nid_to_obj[nid]["data"][
+            "attributes"
+        ]["drupal_internal__nid"]
+        paragraph["data"]["attributes"]["parent_type"] = "node"
+        paragraph["data"]["attributes"][
+            "parent_field_name"
+        ] = "field_contact_service_point"
+        paragraph["data"]["relationships"]["field_reusable_paragraph"] = {
+            "data": {
+                "id": nid_to_obj[row["field_service_point_target_id"]]["data"]["id"],
+                "type": nid_to_obj[row["field_service_point_target_id"]]["data"][
+                    "type"
+                ],
+            }
+        }
+        paragraph = drupal.post(paragraph)
+        from_library_paragraphs.append(
+            {
+                "type": paragraph["data"]["type"],
+                "id": paragraph["data"]["id"],
+                "meta": {
+                    "target_revision_id": paragraph["data"]["attributes"][
+                        "drupal_internal__revision_id"
+                    ]
+                },
+            }
+        )
+    return from_library_paragraphs
+
+
+def load_subpage_data(connection, nid):
+    with connection.cursor() as cursor:
+        sql = (
+            "SELECT `nid`, `title` FROM `node` "
+            "WHERE `nid` IN "
+            "(SELECT `nid` from `book` WHERE `bid`=%s)"
+        )
+        cursor.execute(sql, (nid,))
+        return cursor.fetchall()
+
+
+def load_field_data(connection, fieldname, nid):
+    with connection.cursor() as cursor:
+        sql = (
+            f"SELECT * FROM `field_data_{fieldname}` "
+            "WHERE `entity_id` = %s "
+            "ORDER BY `delta`"
+        )
+        cursor.execute(sql, (nid,))
+        return cursor.fetchall()
+
+
+def load_type(connection, nid):
+    with connection.cursor() as cursor:
+        sql = "SELECT `type` FROM `node` WHERE `nid` = %s"
+        cursor.execute(sql, (nid,))
+        return cursor.fetchone()["type"]
+
+
+def convert_text_format(textformat):
+    if textformat == "1":
+        return "basic_html"
+    elif textformat == "2":
+        return "full_html"
+    elif textformat == "3":
+        return "full_html"
+    else:
+        return "plain_text"
+
+
+def node_newer_than_cutoff(connection, nid, cutoff):
+    with connection.cursor() as cursor:
+        sql = "SELECT changed FROM `node` WHERE `nid`=%s"
+        cursor.execute(sql, (nid,))
+        row = cursor.fetchone()
+        if row is not None and datetime.datetime.fromtimestamp(row["changed"]) > cutoff:
+            return True
+    return False
+
+
+if __name__ == "__main__":
+    cli()
