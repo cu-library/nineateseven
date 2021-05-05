@@ -163,7 +163,9 @@ def cli(
                     migrate_subject_quick_guide_nodes(connection, drupal, mapping)
                 )
                 for quick_nid, detailed_nid in subject_guide_quick_to_detailed.items():
-                    subject_guide_detailed_nid_to_obj[detailed_nid] = nid_to_new_obj[quick_nid]
+                    subject_guide_detailed_nid_to_obj[detailed_nid] = nid_to_new_obj[
+                        quick_nid
+                    ]
             click.echo("Done!")
 
         for nid, obj in nid_to_new_obj.items():
