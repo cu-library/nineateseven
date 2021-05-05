@@ -1791,11 +1791,14 @@ def contact_service_point(connection, drupal, nid, nid_to_obj):
 def load_subpage_data(connection, nid):
     with connection.cursor() as cursor:
         sql = (
-            "SELECT `nid`, `title` FROM `node` "
-            "WHERE `nid` IN "
-            "(SELECT `nid` from `book` WHERE `bid`=%s)"
+            "SELECT `node`.`nid`, `node`.`title` "
+            "FROM `book` "
+            "LEFT JOIN `menu_links` ON `book`.`mlid` = `menu_links`.`mlid` "
+            "LEFT JOIN `node` ON `book`.`nid` = `node`.`nid` "
+            "WHERE `book`.`bid`=%s AND `book`.`nid`!=%s "
+            "ORDER BY `menu_links`.`weight`"
         )
-        cursor.execute(sql, (nid,))
+        cursor.execute(sql, (nid, nid))
         return cursor.fetchall()
 
 
