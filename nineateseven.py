@@ -170,7 +170,13 @@ def cli(
 
         for nid, obj in nid_to_new_obj.items():
             node_type = load_type(connection, nid)
-            click.echo(f"{nid} to {obj['data']['id']}, {node_type} to {obj['data']['type']}...", nl=False)
+            click.echo(
+                (
+                    f"{nid} to {obj['data']['attributes']['drupal_internal__nid']}, "
+                    f"{node_type} to {obj['data']['type']}..."
+                ),
+                nl=False,
+            )
             if node_type == "news":
                 migrate_news_fields(
                     connection,
