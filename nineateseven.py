@@ -101,6 +101,11 @@ def cli(
 
     # Context manager around the connection, so it will be automatically closed.
     with connection:
+
+        # Create a mapping between quick and detailed subject guides.
+        subject_guide_quick_to_detailed = find_subject_guide_pairs(connection)
+        subject_guide_detailed_nid_to_obj = {}
+
         for bundle in bundles:
             click.echo(f"{bundle}...", nl=False)
             if bundle == "news":
@@ -149,17 +154,21 @@ def cli(
                 )
             elif bundle == "subject_detailed_guide":
                 nid_to_new_obj.update(
-                    migrate_subject_detailed_guide_nodes(connection, drupal, mapping)
+                    migrate_subject_detailed_guide_nodes(
+                        connection, drupal, mapping, subject_guide_quick_to_detailed
+                    )
                 )
             elif bundle == "subject_quick_guide":
                 nid_to_new_obj.update(
                     migrate_subject_quick_guide_nodes(connection, drupal, mapping)
                 )
+                for quick_nid, detailed_nid in subject_guide_quick_to_detailed.items():
+                    subject_guide_detailed_nid_to_obj[detailed_nid] = nid_to_new_obj[quick_nid]
             click.echo("Done!")
 
         for nid, obj in nid_to_new_obj.items():
-            click.echo(f"{nid}...", nl=False)
             node_type = load_type(connection, nid)
+            click.echo(f"{nid} to {obj['data']['id']}, {node_type} to {obj['data']['type']}...", nl=False)
             if node_type == "news":
                 migrate_news_fields(
                     connection,
@@ -291,6 +300,15 @@ def cli(
                     {**nid_to_existing_obj, **nid_to_new_obj},
                     mapping,
                 )
+                if nid in subject_guide_quick_to_detailed:
+                    migrate_subject_detailed_guide_fields(
+                        connection,
+                        drupal,
+                        subject_guide_quick_to_detailed[nid],
+                        obj,
+                        {**nid_to_existing_obj, **nid_to_new_obj, **subject_guide_detailed_nid_to_obj},
+                        mapping,
+                    )
             click.echo("Done!")
 
         click.echo("")
@@ -304,6 +322,19 @@ def cli(
         for nid, obj in nid_to_new_obj.items():
             click.echo(f"{nid} = {obj['data']['type']}")
         click.echo("")
+
+
+def find_subject_guide_pairs(connection):
+    pairs = {}
+    with connection.cursor() as cursor:
+        sql = (
+            "SELECT entity_id, field_link_to_detailed_guide_target_id "
+            "FROM field_data_field_link_to_detailed_guide"
+        )
+        cursor.execute(sql)
+        for row in cursor:
+            pairs[row["entity_id"]] = row["field_link_to_detailed_guide_target_id"]
+    return pairs
 
 
 # News Nodes
@@ -1165,7 +1196,9 @@ def migrate_survey_data_fields(connection, drupal, nid, obj, nid_to_obj):
 # Detailed Subject Guide Nodes
 
 
-def migrate_subject_detailed_guide_nodes(connection, drupal, mapping):
+def migrate_subject_detailed_guide_nodes(
+    connection, drupal, mapping, subject_guide_quick_to_detailed
+):
     nid_to_obj = load_objs_from_database(
         connection, "subject_detailed_guide", "node--guide", mapping
     )
@@ -1185,6 +1218,7 @@ def migrate_subject_detailed_guide_nodes(connection, drupal, mapping):
         nid: drupal.post(obj)
         for nid, obj in nid_to_obj.items()
         if str(nid) not in mapping["d7_nid_to_d9_uuid"]
+        and nid not in subject_guide_quick_to_detailed.values()
     }
 
 
