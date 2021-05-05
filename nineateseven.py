@@ -314,7 +314,11 @@ def cli(
                         drupal,
                         subject_guide_quick_to_detailed[nid],
                         obj,
-                        {**nid_to_existing_obj, **nid_to_new_obj, **subject_guide_detailed_nid_to_obj},
+                        {
+                            **nid_to_existing_obj,
+                            **nid_to_new_obj,
+                            **subject_guide_detailed_nid_to_obj,
+                        },
                         mapping,
                     )
             click.echo("Done!")
