@@ -973,6 +973,11 @@ def migrate_help_guide_nodes(connection, drupal, mapping):
 def migrate_help_guide_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
     patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
 
+    # Contact / Service point
+    patch_ready_obj["data"]["relationships"]["field_contact_service_point"] = {
+        "data": contact_service_point(connection, drupal, nid, nid_to_obj)
+    }
+
     # Content Last Reviewed
     patch_ready_obj["data"]["attributes"][
         "field_content_last_reviewed"
