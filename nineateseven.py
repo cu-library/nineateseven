@@ -877,7 +877,7 @@ def migrate_help_guide_nodes(connection, drupal, mapping):
     for nid in nid_to_obj:
         try:
             nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
-                "/guides" + nid_to_obj[nid]["data"]["attributes"]["path"]["alias"]
+                nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].replace("help-guides", "guides/help")
             )
         except KeyError:
             pass
@@ -1021,7 +1021,7 @@ def migrate_course_guide_nodes(connection, drupal, mapping):
     for nid in nid_to_obj:
         try:
             nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
-                "/guides" + nid_to_obj[nid]["data"]["attributes"]["path"]["alias"]
+                nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].replace("research/course-guides", "guides/course")
             )
         except KeyError:
             pass
