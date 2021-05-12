@@ -210,6 +210,7 @@ def cli(
                     nid,
                     obj,
                     {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
                 )
             elif node_type == "transcript":
                 migrate_transcript_fields(
@@ -281,6 +282,7 @@ def cli(
                     nid,
                     obj,
                     {**nid_to_existing_obj, **nid_to_new_obj},
+                    mapping,
                 )
             elif node_type == "survey_data":
                 migrate_survey_data_fields(
@@ -502,6 +504,13 @@ def migrate_database_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
         )
     }
 
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
+
     drupal.patch(patch_ready_obj)
 
 
@@ -633,7 +642,7 @@ def migrate_geospatial_data_fields(connection, drupal, nid, obj, nid_to_obj, map
     ] = text_to_plain_text(connection, "field_gis_publication_date", nid)
 
     # Related Databases
-    patch_ready_obj["data"]["relationships"]["field_related_databases"] = {
+    patch_ready_obj["data"]["relationships"]["field_related_database"] = {
         "data": entity_reference_to_entity_reference(
             connection, "field_related_databases", nid, nid_to_obj
         )
@@ -646,8 +655,12 @@ def migrate_geospatial_data_fields(connection, drupal, nid, obj, nid_to_obj, map
         )
     }
 
-    # Related Help  field_related_help  Entity reference field_related_help
-    # TODO HERE
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
 
     # Resolution
     patch_ready_obj["data"]["attributes"][
@@ -691,7 +704,7 @@ def migrate_policy_nodes(connection, drupal, mapping):
     }
 
 
-def migrate_policy_fields(connection, drupal, nid, obj, nid_to_obj):
+def migrate_policy_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
     patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
 
     # Body
@@ -706,6 +719,46 @@ def migrate_policy_fields(connection, drupal, nid, obj, nid_to_obj):
 
     # Content type
     patch_ready_obj["data"]["attributes"]["field_content_type"] = "Policy"
+
+    # Additional Staff Contacts
+    patch_ready_obj["data"]["relationships"]["field_related_user"] = {
+        "data": user_reference_to_user_reference(
+            connection, "field_additional_authors", nid, mapping
+        )
+    }
+
+    # Related Find
+    patch_ready_obj["data"]["relationships"]["field_related_find"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_find", nid, nid_to_obj
+        )
+    }
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
+    # Related Policies
+    patch_ready_obj["data"]["relationships"]["field_related_page"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_policies", nid, nid_to_obj
+        )
+    }
+
+    # Related Links
+    patch_ready_obj["data"]["attributes"]["field_related_link"] = link_to_link(
+        connection, "field_related_links", nid, nid_to_obj
+    )
 
     drupal.patch(patch_ready_obj)
 
@@ -863,6 +916,32 @@ def migrate_service_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
         connection, "field_brief_description", nid, nid_to_obj
     )
 
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
+
+    # Related Policies
+    patch_ready_obj["data"]["relationships"]["field_related_page"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_policies", nid, nid_to_obj
+        )
+    }
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
+    # Related Links
+    patch_ready_obj["data"]["attributes"]["field_related_link"] = link_to_link(
+        connection, "field_related_links", nid, nid_to_obj
+    )
+
     drupal.patch(patch_ready_obj)
 
 
@@ -876,9 +955,9 @@ def migrate_help_guide_nodes(connection, drupal, mapping):
 
     for nid in nid_to_obj:
         try:
-            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
-                nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].replace("help-guides", "guides/help")
-            )
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = nid_to_obj[nid][
+                "data"
+            ]["attributes"]["path"]["alias"].replace("help-guides", "guides/help")
         except KeyError:
             pass
 
@@ -1003,6 +1082,25 @@ def migrate_help_guide_fields(connection, drupal, nid, obj, nid_to_obj, mapping)
     # Guide Type
     patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Help"
 
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
+    # Related Links
+    patch_ready_obj["data"]["attributes"]["field_related_link"] = link_to_link(
+        connection, "field_related_links", nid, nid_to_obj
+    )
+
     # TODO Add redirects from children to new anchored accordions.
     # /help/[parent-title]/[child-title] becomes
     # /guides/help/[parent-title]#[child-title]
@@ -1020,8 +1118,10 @@ def migrate_course_guide_nodes(connection, drupal, mapping):
 
     for nid in nid_to_obj:
         try:
-            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = (
-                nid_to_obj[nid]["data"]["attributes"]["path"]["alias"].replace("research/course-guides", "guides/course")
+            nid_to_obj[nid]["data"]["attributes"]["path"]["alias"] = nid_to_obj[nid][
+                "data"
+            ]["attributes"]["path"]["alias"].replace(
+                "research/course-guides", "guides/course"
             )
         except KeyError:
             pass
@@ -1060,6 +1160,43 @@ def migrate_course_guide_fields(connection, drupal, nid, obj, nid_to_obj, mappin
 
     # Guide Type
     patch_ready_obj["data"]["attributes"]["field_guide_type"] = "Course"
+
+    # Related Find
+    patch_ready_obj["data"]["relationships"]["field_related_find"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_find", nid, nid_to_obj
+        )
+    }
+
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {"data": []}
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    )
+
+    # Related Course Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_course_guides", nid, nid_to_obj
+        )
+    )
+
+    # Related Subject Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_subject_guides", nid, nid_to_obj
+        )
+    )
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
 
     # TODO Add redirects from children to new anchored accordions.
     # /research/course-guides/[parent-title]/[child-title] becomes
@@ -1144,6 +1281,41 @@ def migrate_find_guide_fields(connection, drupal, nid, obj, nid_to_obj):
         "field_content_last_reviewed"
     ] = content_reviewed(connection, nid)
 
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {"data": []}
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    )
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
+    # Related Policies
+    patch_ready_obj["data"]["relationships"]["field_related_page"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_policies", nid, nid_to_obj
+        )
+    }
+
+    # Related Subject Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_subject_guides", nid, nid_to_obj
+        )
+    )
+
+    # Related Links
+    patch_ready_obj["data"]["attributes"]["field_related_link"] = link_to_link(
+        connection, "field_related_links", nid, nid_to_obj
+    )
+
     drupal.patch(patch_ready_obj)
 
 
@@ -1160,7 +1332,7 @@ def migrate_page_nodes(connection, drupal, mapping):
     }
 
 
-def migrate_page_fields(connection, drupal, nid, obj, nid_to_obj):
+def migrate_page_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
     patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
 
     # Body
@@ -1172,6 +1344,41 @@ def migrate_page_fields(connection, drupal, nid, obj, nid_to_obj):
     patch_ready_obj["data"]["attributes"][
         "field_content_last_reviewed"
     ] = content_reviewed(connection, nid)
+
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {"data": []}
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    )
+
+    # Related Policies
+    patch_ready_obj["data"]["relationships"]["field_related_page"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_policies", nid, nid_to_obj
+        )
+    }
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
+    # Related Links
+    patch_ready_obj["data"]["attributes"]["field_related_link"] = link_to_link(
+        connection, "field_related_links", nid, nid_to_obj
+    )
+
+    # Related Staff
+    patch_ready_obj["data"]["relationships"]["field_related_user"] = {
+        "data": user_reference_to_user_reference(
+            connection, "field_related_staff", nid, mapping
+        )
+    }
 
     drupal.patch(patch_ready_obj)
 
@@ -1276,6 +1483,43 @@ def migrate_subject_detailed_guide_fields(
         )
     }
 
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {"data": []}
+
+    # Related Subject Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_subject_guides", nid, nid_to_obj
+        )
+    )
+
+    # Related Course Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_course_guides", nid, nid_to_obj
+        )
+    )
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    )
+
+    # Related Find
+    patch_ready_obj["data"]["relationships"]["field_related_find"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_find", nid, nid_to_obj
+        )
+    }
+
+    # Related Services
+    patch_ready_obj["data"]["relationships"]["field_related_service"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_services", nid, nid_to_obj
+        )
+    }
+
     drupal.patch(patch_ready_obj)
 
 
@@ -1332,6 +1576,29 @@ def migrate_subject_quick_guide_fields(
     patch_ready_obj["data"]["relationships"]["field_guide_subject_category"] = {
         "data": taxonomy_term_reference_to_taxonomy_term_reference(
             connection, "field_subject_category", nid, mapping
+        )
+    }
+
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {"data": []}
+
+    # Related Subject Guides
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_related_subject_guides", nid, nid_to_obj
+        )
+    )
+
+    # General Research Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
+        entity_reference_to_entity_reference(
+            connection, "field_general_research_help", nid, nid_to_obj
+        )
+    )
+
+    # Additional Staff Contacts
+    patch_ready_obj["data"]["relationships"]["field_related_user"] = {
+        "data": user_reference_to_user_reference(
+            connection, "field_additional_authors", nid, mapping
         )
     }
 
@@ -1588,10 +1855,31 @@ def entity_reference_to_entity_reference(connection, fieldname, nid, nid_to_obj)
     rows = load_field_data(connection, fieldname, nid)
     field = []
     for row in rows:
+        if row[f"{fieldname}_target_id"] not in nid_to_obj:
+            target = row[f"{fieldname}_target_id"]
+            print(
+                f"WARNING: {nid} refers to {target}, which does not exist.",
+                file=sys.stderr,
+            )
+        else:
+            field.append(
+                {
+                    "id": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["id"],
+                    "type": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["type"],
+                }
+            )
+    return field
+
+
+def user_reference_to_user_reference(connection, fieldname, nid, mapping):
+    rows = load_field_data(connection, fieldname, nid)
+    field = []
+    for row in rows:
+        uid = str(row[f"{fieldname}_target_id"])
         field.append(
             {
-                "id": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["id"],
-                "type": nid_to_obj[row[f"{fieldname}_target_id"]]["data"]["type"],
+                "id": mapping["users"][uid],
+                "type": "user--user",
             }
         )
     return field
