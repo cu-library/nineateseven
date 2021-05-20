@@ -168,6 +168,12 @@ def cli(
                     ]
             click.echo("Done!")
 
+        complete_nid_to_obj = {
+            **nid_to_existing_obj,
+            **nid_to_new_obj,
+            **subject_guide_detailed_nid_to_obj,
+        }
+
         for nid, obj in nid_to_new_obj.items():
             node_type = load_type(connection, nid)
             click.echo(
@@ -183,7 +189,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                 )
             elif node_type == "database":
                 migrate_database_fields(
@@ -191,7 +197,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "geospatial_data":
@@ -200,7 +206,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "policy":
@@ -209,7 +215,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "transcript":
@@ -218,7 +224,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                 )
 
             elif node_type == "guide":
@@ -227,7 +233,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             # The only books we migrate from node to node are now services.
@@ -237,7 +243,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "help_guide":
@@ -246,7 +252,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "course_guide":
@@ -255,7 +261,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "collection_page":
@@ -264,7 +270,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "find_guide":
@@ -273,7 +279,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                 )
             elif node_type == "page":
                 migrate_page_fields(
@@ -281,7 +287,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "survey_data":
@@ -290,7 +296,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                 )
             elif node_type == "subject_detailed_guide":
                 migrate_subject_detailed_guide_fields(
@@ -298,7 +304,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
             elif node_type == "subject_quick_guide":
@@ -307,7 +313,7 @@ def cli(
                     drupal,
                     nid,
                     obj,
-                    {**nid_to_existing_obj, **nid_to_new_obj},
+                    complete_nid_to_obj,
                     mapping,
                 )
                 if nid in subject_guide_quick_to_detailed:
@@ -316,11 +322,7 @@ def cli(
                         drupal,
                         subject_guide_quick_to_detailed[nid],
                         obj,
-                        {
-                            **nid_to_existing_obj,
-                            **nid_to_new_obj,
-                            **subject_guide_detailed_nid_to_obj,
-                        },
+                        complete_nid_to_obj,
                         mapping,
                     )
             click.echo("Done!")
@@ -1483,14 +1485,14 @@ def migrate_subject_detailed_guide_fields(
     # Related Subject Guides
     patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
         entity_reference_to_entity_reference(
-            connection, "field_related_subject_guides", nid, nid_to_obj
+            connection, "field_sidebar_subject_guides", nid, nid_to_obj
         )
     )
 
     # Related Course Guides
     patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
         entity_reference_to_entity_reference(
-            connection, "field_related_course_guides", nid, nid_to_obj
+            connection, "field_sidebar_course_guides", nid, nid_to_obj
         )
     )
 
@@ -1579,7 +1581,7 @@ def migrate_subject_quick_guide_fields(
     # Related Subject Guides
     patch_ready_obj["data"]["relationships"]["field_related_guide"]["data"].extend(
         entity_reference_to_entity_reference(
-            connection, "field_related_subject_guides", nid, nid_to_obj
+            connection, "field_other_subject_guides", nid, nid_to_obj
         )
     )
 
