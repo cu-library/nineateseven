@@ -869,11 +869,6 @@ def migrate_service_nodes(connection, drupal, mapping):
 def migrate_service_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
     patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
 
-    # Action Link
-    patch_ready_obj["data"]["attributes"]["field_service_action_link"] = link_to_link(
-        connection, "field_action_link", nid, nid_to_obj
-    )
-
     # Body
     node_type = load_type(connection, nid)
     if node_type == "book":
