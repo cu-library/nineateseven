@@ -106,6 +106,8 @@ def cli(
         subject_guide_quick_to_detailed = find_subject_guide_pairs(connection)
         subject_guide_detailed_nid_to_obj = {}
 
+        book_nids_to_service = []
+
         for bundle in bundles:
             click.echo(f"{bundle}...", nl=False)
             if bundle == "news":
@@ -127,9 +129,10 @@ def cli(
             elif bundle == "guide":
                 nid_to_new_obj.update(migrate_guide_nodes(connection, drupal, mapping))
             elif bundle == "service":
-                nid_to_new_obj.update(
-                    migrate_service_nodes(connection, drupal, mapping)
+                new_objs, book_nids_to_service = migrate_service_nodes(
+                    connection, drupal, mapping
                 )
+                nid_to_new_obj.update(new_objs)
             elif bundle == "help_guide":
                 nid_to_new_obj.update(
                     migrate_help_guide_nodes(connection, drupal, mapping)
@@ -236,9 +239,17 @@ def cli(
                     complete_nid_to_obj,
                     mapping,
                 )
-            # The only books we migrate from node to node are now services.
-            elif node_type == "service" or node_type == "book":
+            elif node_type == "service" or (nid in book_nids_to_service):
                 migrate_service_fields(
+                    connection,
+                    drupal,
+                    nid,
+                    obj,
+                    complete_nid_to_obj,
+                    mapping,
+                )
+            elif node_type == "book":
+                migrate_book_fields(
                     connection,
                     drupal,
                     nid,
@@ -699,6 +710,19 @@ def gis_author(connection, nid):
 def migrate_policy_nodes(connection, drupal, mapping):
     nid_to_obj = load_objs_from_database(connection, "policy", "node--page", mapping)
 
+    books = load_objs_from_database(connection, "book", "node--book", mapping)
+    subpages = {}
+
+    for nid in nid_to_obj:
+        with connection.cursor() as cursor:
+            sql = "SELECT `nid` FROM `book` WHERE `bid`=%s"
+            cursor.execute(sql, (nid,))
+            for row in cursor:
+                if row["nid"] in books:
+                    subpages[row["nid"]] = books[row["nid"]]
+
+    nid_to_obj.update(subpages)
+
     return {
         nid: drupal.post(obj)
         for nid, obj in nid_to_obj.items()
@@ -865,7 +889,7 @@ def migrate_service_nodes(connection, drupal, mapping):
         nid: drupal.post(obj)
         for nid, obj in nid_to_obj.items()
         if str(nid) not in mapping["d7_nid_to_d9_uuid"]
-    }
+    }, list(subpages.keys())
 
 
 def migrate_service_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
@@ -1253,6 +1277,19 @@ def migrate_find_guide_nodes(connection, drupal, mapping):
         connection, "find_guide", "node--find", mapping
     )
 
+    books = load_objs_from_database(connection, "book", "node--book", mapping)
+    subpages = {}
+
+    for nid in nid_to_obj:
+        with connection.cursor() as cursor:
+            sql = "SELECT `nid` FROM `book` WHERE `bid`=%s"
+            cursor.execute(sql, (nid,))
+            for row in cursor:
+                if row["nid"] in books:
+                    subpages[row["nid"]] = books[row["nid"]]
+
+    nid_to_obj.update(subpages)
+
     return {
         nid: drupal.post(obj)
         for nid, obj in nid_to_obj.items()
@@ -1321,6 +1358,19 @@ def migrate_find_guide_fields(connection, drupal, nid, obj, nid_to_obj):
 
 def migrate_page_nodes(connection, drupal, mapping):
     nid_to_obj = load_objs_from_database(connection, "page", "node--page", mapping)
+
+    books = load_objs_from_database(connection, "book", "node--book", mapping)
+    subpages = {}
+
+    for nid in nid_to_obj:
+        with connection.cursor() as cursor:
+            sql = "SELECT `nid` FROM `book` WHERE `bid`=%s"
+            cursor.execute(sql, (nid,))
+            for row in cursor:
+                if row["nid"] in books:
+                    subpages[row["nid"]] = books[row["nid"]]
+
+    nid_to_obj.update(subpages)
 
     return {
         nid: drupal.post(obj)
@@ -1598,6 +1648,36 @@ def migrate_subject_quick_guide_fields(
             connection, "field_additional_authors", nid, mapping
         )
     }
+
+    drupal.patch(patch_ready_obj)
+
+
+def migrate_book_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
+    patch_ready_obj = build_obj(obj["data"]["type"], obj["data"]["id"])
+
+    # Body
+    patch_ready_obj["data"]["attributes"][
+        "body"
+    ] = text_with_summary_to_text_with_summary(connection, "body", nid, nid_to_obj)
+
+    # Related Find
+    patch_ready_obj["data"]["relationships"]["field_related_find"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_find", nid, nid_to_obj
+        )
+    }
+
+    # Related Help
+    patch_ready_obj["data"]["relationships"]["field_related_guide"] = {
+        "data": entity_reference_to_entity_reference(
+            connection, "field_related_help", nid, nid_to_obj
+        )
+    }
+
+    # Content Last Reviewed
+    patch_ready_obj["data"]["attributes"][
+        "field_content_last_reviewed"
+    ] = content_reviewed(connection, nid)
 
     drupal.patch(patch_ready_obj)
 
