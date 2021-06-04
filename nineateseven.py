@@ -432,15 +432,15 @@ def migrate_database_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
         connection, "field_database_advisory", nid, nid_to_obj
     )
 
-    # Alternate Spellings
+    # Alternate Spellings -> Alternate Titles
     patch_ready_obj["data"]["attributes"][
-        "field_database_alt_spellings"
+        "field_database_alternate_titles"
     ] = text_to_plain_text(connection, "field_alternate_spellings", nid)
 
     # Alternate Titles
-    patch_ready_obj["data"]["attributes"][
-        "field_database_alternate_titles"
-    ] = text_to_plain_text(connection, "field_database_alternate_titles", nid)
+    patch_ready_obj["data"]["attributes"]["field_database_alternate_titles"].expand(
+        text_to_plain_text(connection, "field_database_alternate_titles", nid)
+    )
 
     # Author
     patch_ready_obj["data"]["attributes"]["field_database_author"] = text_to_plain_text(
