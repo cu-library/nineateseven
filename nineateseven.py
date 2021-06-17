@@ -1731,6 +1731,12 @@ def load_objs_from_mapping(mapping, drupal):
 
 
 def clean_uri(uri, nid_to_obj, originating_nid):
+    # Warn about catalogue links
+    if "catalogue.library.carleton.ca" in uri:
+        print(
+            "WARNING: catalogue link in {originating_nid}.",
+            file=sys.stderr,
+        )
     # Normalize all internal links
     if uri.startswith("node/"):
         uri = "https://library.carleton.ca/" + uri
