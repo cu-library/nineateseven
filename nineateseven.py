@@ -438,7 +438,7 @@ def migrate_database_fields(connection, drupal, nid, obj, nid_to_obj, mapping):
     ] = text_to_plain_text(connection, "field_alternate_spellings", nid)
 
     # Alternate Titles
-    patch_ready_obj["data"]["attributes"]["field_database_alternate_titles"].expand(
+    patch_ready_obj["data"]["attributes"]["field_database_alternate_titles"].extend(
         text_to_plain_text(connection, "field_database_alternate_titles", nid)
     )
 
@@ -1463,6 +1463,10 @@ def migrate_subject_detailed_guide_nodes(
             )
         except KeyError:
             pass
+        except IndexError:
+            click.echo(
+                f"alias {nid_to_obj[nid]['data']['attributes']['path']['alias']} invalid"
+            )
 
     return {
         nid: drupal.post(obj)
@@ -1758,7 +1762,7 @@ def clean_uri(uri, nid_to_obj, originating_nid):
     # Warn about catalogue links
     if "catalogue.library.carleton.ca" in uri:
         print(
-            "WARNING: catalogue link in {originating_nid}.",
+            f"WARNING: catalogue link in {originating_nid}.",
             file=sys.stderr,
         )
     # Normalize all internal links
@@ -1856,6 +1860,8 @@ def link_to_link(connection, fieldname, nid, nid_to_obj):
         }
         if field_data["uri"] == "":
             field_data["uri"] = "route:<nolink>"
+        if field_data["uri"].startswith("find/"):
+            field_data["uri"] = "internal:/" + field_data["uri"]
         field.append(field_data)
     return field
 
